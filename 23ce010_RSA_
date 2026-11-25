@@ -5,9 +5,8 @@
 # Run once if Fairlearn is not installed:
 # !pip install fairlearn -q
 
-import os
-import pandas as pd
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
@@ -21,8 +20,8 @@ from fairlearn.metrics import (
     equalized_odds_difference
 )
 from fairlearn.postprocessing import ThresholdOptimizer
+from IPython.display import display, HTML
 
-# Reproducibility for randomized threshold search
 np.random.seed(42)
 
 # ------------------------------------------------------------
@@ -32,25 +31,13 @@ url = "https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.dat
 cols = ["age","workclass","fnlwgt","education","education-num","marital-status",
         "occupation","relationship","race","sex","capital-gain","capital-loss",
         "hours-per-week","native-country","income"]
+df = pd.read_csv(url, names=cols, na_values="?", skipinitialspace=True)
+df = df.dropna().reset_index(drop=True)
+df["income"] = (df["income"].str.strip() == ">50K").astype(int)
 
-def load_adult():
-    """Load local adult.csv (exam file) if present; otherwise download from UCI."""
-    if os.path.exists("adult.csv"):
-        d = pd.read_csv("adult.csv", header=None, names=cols,
-                        na_values="?", skipinitialspace=True)
-        # Drop it if the CSV already contained a header row
-        if str(d.iloc[0]["age"]).strip().lower() == "age":
-            d = d.iloc[1:].reset_index(drop=True)
-        return d
-    return pd.read_csv(url, names=cols, na_values="?", skipinitialspace=True)
-
-df = load_adult()
-df = df.dropna().reset_index(drop=True)                          # remove "?" rows
-df["income"] = (df["income"].astype(str).str.strip() == ">50K").astype(int)
-
-sensitive = df["sex"].copy()                                     # only for fairness
+sensitive = df["sex"].copy()
 y = df["income"].copy()
-X = df.drop(columns=["sex", "income"])                           # sex NOT a feature
+X = df.drop(columns=["sex", "income"])
 
 num_cols = X.select_dtypes(include=["int64","float64"]).columns.tolist()
 cat_cols = X.select_dtypes(include=["object"]).columns.tolist()
@@ -88,7 +75,6 @@ metrics_dict = {
 }
 mf_base = MetricFrame(metrics=metrics_dict, y_true=y_test,
                       y_pred=y_pred_base, sensitive_features=sf_test)
-
 print("\n--- Baseline group-wise metrics (by sex) ---")
 print(mf_base.by_group.round(4))
 
@@ -106,14 +92,11 @@ print(f"Demographic Parity Ratio (DI) : {dp_ratio:.4f}  "
 print(f"Equalized Odds Difference     : {eo_diff:.4f}")
 
 # ------------------------------------------------------------
-# TASK 4 — ThresholdOptimizer with demographic_parity
-# (random_state removed — not accepted in this Fairlearn version)
+# TASK 4 — ThresholdOptimizer: demographic_parity
 # ------------------------------------------------------------
 to_dp = ThresholdOptimizer(
-    estimator=base_model,
-    constraints="demographic_parity",
-    predict_method="predict_proba",
-    prefit=True
+    estimator=base_model, constraints="demographic_parity",
+    predict_method="predict_proba", prefit=True
 )
 to_dp.fit(X_train, y_train, sensitive_features=sf_train)
 y_pred_dp = to_dp.predict(X_test, sensitive_features=sf_test)
@@ -130,13 +113,11 @@ print(f"DP diff : {demographic_parity_difference(y_test, y_pred_dp, sensitive_fe
 print(f"EO diff : {equalized_odds_difference(y_test, y_pred_dp, sensitive_features=sf_test):.4f}")
 
 # ------------------------------------------------------------
-# TASK 5 — ThresholdOptimizer with equalized_odds
+# TASK 5 — ThresholdOptimizer: equalized_odds
 # ------------------------------------------------------------
 to_eo = ThresholdOptimizer(
-    estimator=base_model,
-    constraints="equalized_odds",
-    predict_method="predict_proba",
-    prefit=True
+    estimator=base_model, constraints="equalized_odds",
+    predict_method="predict_proba", prefit=True
 )
 to_eo.fit(X_train, y_train, sensitive_features=sf_train)
 y_pred_eo = to_eo.predict(X_test, sensitive_features=sf_test)
@@ -189,3 +170,91 @@ comparison = pd.DataFrame({
 print("\n--- Accuracy vs Fairness Comparison Table ---")
 print(comparison.round(4).to_string(index=False))
 print("\nPlot saved: selection_rate_by_sex.png")
+
+# ------------------------------------------------------------
+# Q1–Q4 ANSWERS
+# ------------------------------------------------------------
+qa_text = """
+============================================================
+  TECHNICAL QUESTIONS — ANSWERS (Q1–Q4)
+============================================================
+
+Q1. Overall accuracy, Male/Female selection rate, TPR, FPR.
+    Which group is disadvantaged?
+------------------------------------------------------------
+    Overall accuracy = 0.85
+
+    Group    Accuracy   Selection Rate   TPR    FPR
+    Male       0.81         0.26        0.61   0.10
+    Female     0.92         0.08        0.49   0.02
+
+    Females are disadvantaged. Only 8% of women receive an
+    offer vs 26% of men. Women's TPR is also lower (0.49 vs
+    0.61) — qualified women are missed more often. Female
+    accuracy looks higher (0.92) only because most women are
+    predicted 'low income', so the model scores well while
+    giving them almost no offers.
+
+Q2. DP difference, DP ratio, EO difference. Passes 80% rule?
+    Why bias without 'sex'?
+------------------------------------------------------------
+    DP difference = 0.18
+    DP ratio (DI) = 0.31
+    EO difference = 0.11
+
+    Fails the four-fifths rule — DI ratio 0.31 << 0.80.
+
+    Why bias without 'sex': indirect (proxy) discrimination.
+    Features such as relationship (Husband/Wife), marital-
+    status, occupation, and hours-per-week are strongly
+    correlated with sex. The model learns gender indirectly
+    from historical data that already reflects gender
+    inequality. Removing 'sex' does not remove the bias.
+
+Q3. Compare the two ThresholdOptimizer results. What
+    happened to the other metric?
+------------------------------------------------------------
+    Model                     Acc  Sel_M  Sel_F  DP   EO
+    Baseline                  0.85  0.26   0.08  0.18 0.11
+    TO: demographic_parity    0.83  0.16   0.17  0.00 0.35
+    TO: equalized_odds        0.83  0.21   0.13  0.08 0.02
+
+    DP constraint: DP diff -> 0.00 (selection rates equal),
+    but EO diff worsens from 0.11 to 0.35.
+
+    EO constraint: EO diff -> 0.02 (error rates equal), but
+    DP diff stays at 0.08 — still fails the 80% rule.
+
+    Conclusion: fixing one fairness metric breaks or fails
+    to fix the other. No single model satisfies both.
+
+Q4. Accuracy lost? Which mitigation to recommend? One
+    limitation?
+------------------------------------------------------------
+    Accuracy lost: 0.85 -> 0.83 = 2 percentage points
+    (~2.4% relative) for both methods.
+
+    Recommend: ThresholdOptimizer with demographic_parity.
+      - The complaint is about fewer offers to women — DP
+        directly fixes that (0.16 vs 0.17).
+      - Passes the four-fifths rule (ratio ~1.0); the EO
+        model still fails it (0.62) and stays legally
+        exposed.
+      - Same accuracy cost as EO, so nothing is lost by
+        choosing DP.
+
+    Limitation: ThresholdOptimizer needs the sensitive
+    attribute ('sex') at prediction time to apply different
+    thresholds per group. This may be illegal or impossible
+    in real deployment, can be gamed, and only fixes the
+    output — it does not remove proxy bias in the features.
+============================================================
+"""
+print(qa_text)
+
+# ------------------------------------------------------------
+# GITHUB REPOSITORY LINK
+# ------------------------------------------------------------
+GITHUB_LINK = "https://github.com/nikunj9910/RSA_Examination_SetC/blob/main/23ce010_RSA_"
+print("GitHub Repository:", GITHUB_LINK)
+display(HTML(f'<a href="{GITHUB_LINK}" target="_blank">{GITHUB_LINK}</a>'))
