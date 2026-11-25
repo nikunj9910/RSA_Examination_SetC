@@ -2,8 +2,10 @@
 # FAIRNESS AUDIT — Adult Census Income / Credit-Card Offers
 # Subject: Responsible and Safe AI (AIML4001) — Set C
 # ============================================================
-# !pip install fairlearn -q   # run once if Fairlearn is missing
+# Run once if Fairlearn is not installed:
+# !pip install fairlearn -q
 
+import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -20,6 +22,9 @@ from fairlearn.metrics import (
 )
 from fairlearn.postprocessing import ThresholdOptimizer
 
+# Reproducibility for randomized threshold search
+np.random.seed(42)
+
 # ------------------------------------------------------------
 # TASK 1 — Load, clean, encode, scale, train LR (no "sex")
 # ------------------------------------------------------------
@@ -27,13 +32,25 @@ url = "https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.dat
 cols = ["age","workclass","fnlwgt","education","education-num","marital-status",
         "occupation","relationship","race","sex","capital-gain","capital-loss",
         "hours-per-week","native-country","income"]
-df = pd.read_csv(url, names=cols, na_values="?", skipinitialspace=True)
-df = df.dropna().reset_index(drop=True)                       # remove "?" rows
-df["income"] = (df["income"].str.strip() == ">50K").astype(int)
 
-sensitive = df["sex"].copy()                                  # only for fairness
+def load_adult():
+    """Load local adult.csv (exam file) if present; otherwise download from UCI."""
+    if os.path.exists("adult.csv"):
+        d = pd.read_csv("adult.csv", header=None, names=cols,
+                        na_values="?", skipinitialspace=True)
+        # Drop it if the CSV already contained a header row
+        if str(d.iloc[0]["age"]).strip().lower() == "age":
+            d = d.iloc[1:].reset_index(drop=True)
+        return d
+    return pd.read_csv(url, names=cols, na_values="?", skipinitialspace=True)
+
+df = load_adult()
+df = df.dropna().reset_index(drop=True)                          # remove "?" rows
+df["income"] = (df["income"].astype(str).str.strip() == ">50K").astype(int)
+
+sensitive = df["sex"].copy()                                     # only for fairness
 y = df["income"].copy()
-X = df.drop(columns=["sex", "income"])                        # sex NOT a feature
+X = df.drop(columns=["sex", "income"])                           # sex NOT a feature
 
 num_cols = X.select_dtypes(include=["int64","float64"]).columns.tolist()
 cat_cols = X.select_dtypes(include=["object"]).columns.tolist()
@@ -90,10 +107,13 @@ print(f"Equalized Odds Difference     : {eo_diff:.4f}")
 
 # ------------------------------------------------------------
 # TASK 4 — ThresholdOptimizer with demographic_parity
+# (random_state removed — not accepted in this Fairlearn version)
 # ------------------------------------------------------------
 to_dp = ThresholdOptimizer(
-    estimator=base_model, constraints="demographic_parity",
-    predict_method="predict_proba", prefit=True, random_state=42
+    estimator=base_model,
+    constraints="demographic_parity",
+    predict_method="predict_proba",
+    prefit=True
 )
 to_dp.fit(X_train, y_train, sensitive_features=sf_train)
 y_pred_dp = to_dp.predict(X_test, sensitive_features=sf_test)
@@ -113,8 +133,10 @@ print(f"EO diff : {equalized_odds_difference(y_test, y_pred_dp, sensitive_featur
 # TASK 5 — ThresholdOptimizer with equalized_odds
 # ------------------------------------------------------------
 to_eo = ThresholdOptimizer(
-    estimator=base_model, constraints="equalized_odds",
-    predict_method="predict_proba", prefit=True, random_state=42
+    estimator=base_model,
+    constraints="equalized_odds",
+    predict_method="predict_proba",
+    prefit=True
 )
 to_eo.fit(X_train, y_train, sensitive_features=sf_train)
 y_pred_eo = to_eo.predict(X_test, sensitive_features=sf_test)
