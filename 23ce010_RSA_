@@ -1,0 +1,169 @@
+# ============================================================
+# FAIRNESS AUDIT — Adult Census Income / Credit-Card Offers
+# Subject: Responsible and Safe AI (AIML4001) — Set C
+# ============================================================
+# !pip install fairlearn -q   # run once if Fairlearn is missing
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
+from fairlearn.metrics import (
+    MetricFrame, selection_rate, true_positive_rate, false_positive_rate,
+    demographic_parity_difference, demographic_parity_ratio,
+    equalized_odds_difference
+)
+from fairlearn.postprocessing import ThresholdOptimizer
+
+# ------------------------------------------------------------
+# TASK 1 — Load, clean, encode, scale, train LR (no "sex")
+# ------------------------------------------------------------
+url = "https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.data"
+cols = ["age","workclass","fnlwgt","education","education-num","marital-status",
+        "occupation","relationship","race","sex","capital-gain","capital-loss",
+        "hours-per-week","native-country","income"]
+df = pd.read_csv(url, names=cols, na_values="?", skipinitialspace=True)
+df = df.dropna().reset_index(drop=True)                       # remove "?" rows
+df["income"] = (df["income"].str.strip() == ">50K").astype(int)
+
+sensitive = df["sex"].copy()                                  # only for fairness
+y = df["income"].copy()
+X = df.drop(columns=["sex", "income"])                        # sex NOT a feature
+
+num_cols = X.select_dtypes(include=["int64","float64"]).columns.tolist()
+cat_cols = X.select_dtypes(include=["object"]).columns.tolist()
+
+preprocessor = ColumnTransformer([
+    ("num", StandardScaler(), num_cols),
+    ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), cat_cols)
+])
+
+X_train, X_test, y_train, y_test, sf_train, sf_test = train_test_split(
+    X, y, sensitive, test_size=0.30, stratify=y, random_state=42
+)
+
+base_model = Pipeline([
+    ("prep", preprocessor),
+    ("clf", LogisticRegression(max_iter=1000, random_state=42))
+])
+base_model.fit(X_train, y_train)
+y_pred_base = base_model.predict(X_test)
+
+print(f"Rows after cleaning : {len(df)}")
+print(f"Train / Test size   : {X_train.shape[0]} / {X_test.shape[0]}")
+
+# ------------------------------------------------------------
+# TASK 2 — MetricFrame: accuracy, selection rate, TPR, FPR
+# ------------------------------------------------------------
+overall_acc = accuracy_score(y_test, y_pred_base)
+print(f"\nBaseline overall accuracy: {overall_acc:.4f}")
+
+metrics_dict = {
+    "accuracy": accuracy_score,
+    "selection_rate": selection_rate,
+    "TPR": true_positive_rate,
+    "FPR": false_positive_rate
+}
+mf_base = MetricFrame(metrics=metrics_dict, y_true=y_test,
+                      y_pred=y_pred_base, sensitive_features=sf_test)
+
+print("\n--- Baseline group-wise metrics (by sex) ---")
+print(mf_base.by_group.round(4))
+
+# ------------------------------------------------------------
+# TASK 3 — DP difference, DP ratio, EO difference
+# ------------------------------------------------------------
+dp_diff  = demographic_parity_difference(y_test, y_pred_base, sensitive_features=sf_test)
+dp_ratio = demographic_parity_ratio(y_test, y_pred_base, sensitive_features=sf_test)
+eo_diff  = equalized_odds_difference(y_test, y_pred_base, sensitive_features=sf_test)
+
+print("\n--- Fairness difference metrics (baseline) ---")
+print(f"Demographic Parity Difference : {dp_diff:.4f}")
+print(f"Demographic Parity Ratio (DI) : {dp_ratio:.4f}  "
+      f"{'< 0.80 -> BIAS' if dp_ratio < 0.8 else '>= 0.80 -> PASS'}")
+print(f"Equalized Odds Difference     : {eo_diff:.4f}")
+
+# ------------------------------------------------------------
+# TASK 4 — ThresholdOptimizer with demographic_parity
+# ------------------------------------------------------------
+to_dp = ThresholdOptimizer(
+    estimator=base_model, constraints="demographic_parity",
+    predict_method="predict_proba", prefit=True, random_state=42
+)
+to_dp.fit(X_train, y_train, sensitive_features=sf_train)
+y_pred_dp = to_dp.predict(X_test, sensitive_features=sf_test)
+
+acc_dp = accuracy_score(y_test, y_pred_dp)
+mf_dp  = MetricFrame(metrics=metrics_dict, y_true=y_test,
+                     y_pred=y_pred_dp, sensitive_features=sf_test)
+sel_dp = mf_dp.by_group["selection_rate"]
+
+print("\n--- ThresholdOptimizer: demographic_parity ---")
+print(f"Accuracy: {acc_dp:.4f}")
+print(mf_dp.by_group.round(4))
+print(f"DP diff : {demographic_parity_difference(y_test, y_pred_dp, sensitive_features=sf_test):.4f}")
+print(f"EO diff : {equalized_odds_difference(y_test, y_pred_dp, sensitive_features=sf_test):.4f}")
+
+# ------------------------------------------------------------
+# TASK 5 — ThresholdOptimizer with equalized_odds
+# ------------------------------------------------------------
+to_eo = ThresholdOptimizer(
+    estimator=base_model, constraints="equalized_odds",
+    predict_method="predict_proba", prefit=True, random_state=42
+)
+to_eo.fit(X_train, y_train, sensitive_features=sf_train)
+y_pred_eo = to_eo.predict(X_test, sensitive_features=sf_test)
+
+acc_eo = accuracy_score(y_test, y_pred_eo)
+mf_eo  = MetricFrame(metrics=metrics_dict, y_true=y_test,
+                     y_pred=y_pred_eo, sensitive_features=sf_test)
+sel_eo = mf_eo.by_group["selection_rate"]
+
+print("\n--- ThresholdOptimizer: equalized_odds ---")
+print(f"Accuracy: {acc_eo:.4f}")
+print(mf_eo.by_group.round(4))
+print(f"DP diff : {demographic_parity_difference(y_test, y_pred_eo, sensitive_features=sf_test):.4f}")
+print(f"EO diff : {equalized_odds_difference(y_test, y_pred_eo, sensitive_features=sf_test):.4f}")
+
+# ------------------------------------------------------------
+# TASK 6 — Plot selection rate + accuracy vs fairness table
+# ------------------------------------------------------------
+labels = ["Male", "Female"]
+baseline_vals = [mf_base.by_group.loc["Male","selection_rate"],
+                 mf_base.by_group.loc["Female","selection_rate"]]
+dp_vals = [sel_dp.loc["Male"], sel_dp.loc["Female"]]
+eo_vals = [sel_eo.loc["Male"], sel_eo.loc["Female"]]
+
+x = np.arange(len(labels)); width = 0.25
+fig, ax = plt.subplots(figsize=(7, 4))
+ax.bar(x - width, baseline_vals, width, label="Baseline")
+ax.bar(x,         dp_vals,       width, label="TO: DP")
+ax.bar(x + width, eo_vals,       width, label="TO: EO")
+ax.set_xticks(x); ax.set_xticklabels(labels)
+ax.set_ylabel("Selection Rate")
+ax.set_title("Selection Rate by Sex: Baseline vs Mitigated")
+ax.legend()
+plt.tight_layout()
+plt.savefig("selection_rate_by_sex.png", dpi=150)
+plt.show()
+
+comparison = pd.DataFrame({
+    "Model":      ["Baseline", "TO: demographic_parity", "TO: equalized_odds"],
+    "Accuracy":   [overall_acc, acc_dp, acc_eo],
+    "SEL_Male":   [baseline_vals[0], dp_vals[0], eo_vals[0]],
+    "SEL_Female": [baseline_vals[1], dp_vals[1], eo_vals[1]],
+    "DP_Diff":    [dp_diff,
+                   demographic_parity_difference(y_test, y_pred_dp, sensitive_features=sf_test),
+                   demographic_parity_difference(y_test, y_pred_eo, sensitive_features=sf_test)],
+    "EO_Diff":    [eo_diff,
+                   equalized_odds_difference(y_test, y_pred_dp, sensitive_features=sf_test),
+                   equalized_odds_difference(y_test, y_pred_eo, sensitive_features=sf_test)]
+})
+print("\n--- Accuracy vs Fairness Comparison Table ---")
+print(comparison.round(4).to_string(index=False))
+print("\nPlot saved: selection_rate_by_sex.png")
